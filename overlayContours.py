@@ -1,28 +1,20 @@
-from copy import deepcopy
-from itertools import product
-
-from shapely.geometry import LineString
-from shapely.geometry.polygon import Polygon
-from shapely.affinity import scale
 from scipy.ndimage import rotate
-import matplotlib.pyplot as plt
+
 import cv2
 import numpy as np
 import glob
 
-def four_point_transform(image, poly):
+def four_point_transform(image, quad):
     """
     A perspective transform for a quadrilateral polygon.
     Slightly modified version of the same function from
     https://github.com/EdjeElectronics/OpenCV-Playing-Card-Detector
     """
-    pts = np.zeros((4, 2))
-    pts[:, 0] = np.asarray(poly.exterior.coords)[:-1, 0]
-    pts[:, 1] = np.asarray(poly.exterior.coords)[:-1, 1]
+    
     # obtain a consistent order of the points and unpack them
     # individually
     rect = np.zeros((4, 2))
-    (rect[:, 0], rect[:, 1]) = order_polygon_points(pts[:, 0], pts[:, 1])
+    (rect[:, 0], rect[:, 1]) = order_polygon_points(quad[:, 0], quad[:, 1])
 
     # compute the width of the new image, which will be the
     # maximum distance between bottom-right and bottom-left
@@ -100,15 +92,6 @@ def line_intersection(x, y):
         yis = (xy_01 * (y[2] - y[3]) - (y[0] - y[1]) * xy_23) / denom
 
     return (xis, yis)
-
-def convex_hull_polygon(contour):
-    """
-    Returns the convex hull of the given contour as a polygon.
-    """
-    hull = cv2.convexHull(contour)
-    phull = Polygon([[x, y] for (x, y) in
-                     zip(hull[:, :, 0], hull[:, :, 1])])
-    return phull
     
 def order_lines(lines):
 
@@ -121,65 +104,74 @@ def order_lines(lines):
     return lines[ind]
     
     
-            
-def characterize_card_contour_(card_contour,
+def scale_contour(cnt, scale):
+    M = cv2.moments(cnt)
+    cx = int(M['m10']/M['m00'])
+    cy = int(M['m01']/M['m00'])
+
+    cnt_norm = cnt - [cx, cy]
+    cnt_scaled = cnt_norm * scale
+    cnt_scaled = cnt_scaled + [cx, cy]
+    cnt_scaled = cnt_scaled.astype(np.int32)
+
+    return cnt_scaled
+    
+def characterize_card_contour(card_contour,
                               max_segment_area,
-                              image_area,
-                              im):
-    """
-    Calculates a bounding polygon for a contour, in addition
-    to several charasteristic parameters.
-    """
-    phull = convex_hull_polygon(card_contour)
-    if (phull.area < 0.1 * max_segment_area or
-            phull.area < image_area / 1000.):
-        # break after card size range has been explored
+                              image_height,
+                              image_width):
+
+                              
+    image_area = image_height*image_width
+    hull = cv2.convexHull(card_contour)
+    hull_area = cv2.contourArea(hull)
+
+    if (hull_area < 0.1 * max_segment_area or
+            hull_area < image_area / 1000.):
         continue_segmentation = False
         is_card_candidate = False
-        bounding_poly = None
-        crop_factor = 1.
-    else:
-
-        continue_segmentation = True
-        h,w,_ = im.shape
-        mask = np.zeros((h,w,1),np.uint8)
+        bound_quad = None
         
-        hull = cv2.convexHull(card_contour)
-        imc = im.copy()
-        cv2.drawContours(imc, [hull], 0, (255,0,0))
+    else:
+        continue_segmentation = True
+        
+        mask = np.zeros((image_height,image_width,1),np.uint8)
         cv2.drawContours(mask, [hull], 0, 255)
         
-        linesP = cv2.HoughLinesP(mask, 1, np.pi/180, 25, None, 50 , 300)
+        linesP = cv2.HoughLinesP(mask, 1, np.pi/180, 25, None, 30 , 300)
+        
         coords = np.zeros((4,2), np.int32)
+        
         if linesP is not None and len(linesP)>=4:
             sorted_lines = order_lines(linesP[:4,0])
             for i in range(0, 4):
+        
                 l1 = sorted_lines[i]
                 l2 = sorted_lines[(i+1)%4]
                 intersect = line_intersection((l1[0],l1[2], l2[0], l2[2]), (l1[1],l1[3], l2[1], l2[3]))
                 
                 if(intersect == (np.nan, np.nan)):
-                    bounding_poly = None
+                    bound_quad = None
                     is_card_candidate = False
-                    crop_factor = None
                     break
+
                 else:
                     coords[i]=(np.int32(np.asarray(intersect)))
-                    bounding_poly = Polygon(coords)
-                    is_card_candidate = 0.1 * max_segment_area < bounding_poly.area < image_area * 0.8
-                    crop_factor = phull.area/bounding_poly.area if is_card_candidate else 0
+                    quad_area = cv2.contourArea(coords)
+                    
+                    
+                    is_card_candidate = 0.1 * max_segment_area < quad_area < image_area * 0.8
+                    bound_quad = coords
+
         else:
-            bounding_poly = None
+            bound_quad = None
             is_card_candidate = False
-            crop_factor = None
-        
         
         
         
     return (continue_segmentation,
             is_card_candidate,
-            bounding_poly,
-            crop_factor)
+            bound_quad)
             
 def contour_image(im):
     gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
@@ -223,40 +215,31 @@ def process_image(image, name, phashes):
     candidates = []
     idx = 0
     for card_contour in contours:
-        try:    
-            (continue_segmentation,
-                 is_card_candidate,
-                 bounding_poly,
-                 crop_factor) = characterize_card_contour_(card_contour, max_segment_area, im_area, im)
-        except NotImplementedError as nie:
-            # this can occur in Shapely for some funny contour shapes
-            # resolve by discarding the candidate
-            (continue_segmentation,
-             is_card_candidate,
-             bounding_poly,
-             crop_factor) = (True, False, None, 1.)
+        h,w,_ = im.shape
+        (continue_segmentation,
+            is_card_candidate,
+            bounding_quad) = characterize_card_contour(card_contour, max_segment_area, h,w)
+           
         if not continue_segmentation:
             break
         if is_card_candidate:
+            
             if max_segment_area < 0.1:
-                max_segment_area = bounding_poly.area
-            warped = four_point_transform(image, scale(bounding_poly,
-                                            xfact=0.95,
-                                            yfact=0.95,
-                                            origin='centroid'))
+                max_segment_area = cv2.contourArea(bounding_quad)
+            warped = four_point_transform(image, scale_contour(bounding_quad, 0.98))
+            
             h,w,_ = warped.shape
             if(1.3 < h/w < 1.5):
-                candidates.append((warped,
-                                  bounding_poly,
-                                  bounding_poly.area / im_area))
+                candidates.append((warped, bounding_quad))
+                cv2.polylines(image, np.int32([bounding_quad]), True, (0,255,255), thickness=1)
             elif(1.3 < w/h < 1.5):
-                candidates.append((rotate(warped,90),
-                                  bounding_poly,
-                                  bounding_poly.area / im_area))
+                candidates.append((rotate(warped,90), bounding_quad))
+                cv2.polylines(image, np.int32([bounding_quad]), True, (0,255,255), thickness=1)
+                                  
             
     matched = []
     for i, candidate in enumerate(candidates):
-        (warped, bounding_quad, _) = candidate
+        (warped, bounding_quad) = candidate
         #cv2.imshow("warped{}".format(i), warped)
         #cv2.waitKey(0)
         #bquad_corners = np.empty((4, 2))
@@ -264,8 +247,10 @@ def process_image(image, name, phashes):
         #bquad_corners[:, 1] = np.asarray(bounding_quad.exterior.coords)[:-1, 1]
         #pts = bquad_corners.reshape((-1,1,2))
         
-        
-        
+        recog_thresh = 4
+        #cv2.imshow("warp", warped)
+        #cv2.waitKey(0)
+        #cv2.destroyWindow("warp")
         card_name = 'unknown'
         is_recognized = False
         recognition_score = 0.
@@ -284,24 +269,18 @@ def process_image(image, name, phashes):
             d_0_ave = np.average(d_0_)
             d_0_std = np.std(d_0_)
             d_0_dist[j] = (d_0_ave - np.amin(d_0[:, j])) / d_0_std
-            if (d_0_dist[j] > 4 and np.argmax(d_0_dist) == j):
+            if (d_0_dist[j] > recog_thresh and np.argmax(d_0_dist) == j):
                 card_name = names[np.argmin(d_0[:, j])]
                 is_recognized = True
-                recognition_score = d_0_dist[j] / 4
+                recognition_score = d_0_dist[j] / recog_thresh
                 matched.append([card_name, recognition_score, False, bounding_quad])
                 break
     
     for match in matched:
         [name, score, is_fragment, quad] = match
-        bquad_corners = np.empty((4, 2))
-        bquad_corners[:, 0] = np.asarray(quad.exterior.coords)[:-1, 0]
-        bquad_corners[:, 1] = np.asarray(quad.exterior.coords)[:-1, 1]
-        pts = bquad_corners.reshape((-1,1,2))
-        bounding_poly = Polygon([[x, y] for (x, y) in zip(bquad_corners[:, 0],  bquad_corners[:, 1])])
-        
-        
-        
-        middle = (np.average(bquad_corners[:, 0]), np.average(bquad_corners[:, 1]))
+        pts = quad.reshape((-1,1,2))
+
+        middle = (np.average(quad[:, 0]), np.average(quad[:, 1]))
         
         
         fontScale = 0.5
@@ -316,6 +295,7 @@ def process_image(image, name, phashes):
         cv2.polylines(image, np.int32([pts]), True, (0,255,0), thickness=2)
         cv2.rectangle(image, topleft, bottomright, (0,0,0), -1)
         cv2.putText(image, name, origin, font, fontScale,fontColor, thickness=thickness)
+    
     return 
     
 if __name__ == "__main__":
@@ -363,7 +343,7 @@ if __name__ == "__main__":
         rval, frame = vc.read()
         process_image(frame,names, phashes)
         cv2.imshow("preview", frame)
-        key = cv2.waitKey(200)
+        key = cv2.waitKey(250)
         #break
         if key == 27: # exit on ESC
             break

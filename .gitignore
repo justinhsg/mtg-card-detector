@@ -1,1 +1,5 @@
 m21/*.jpg
+hough-test.py
+cache/*.*
+import/*
+__pycache__/

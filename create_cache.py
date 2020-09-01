@@ -4,15 +4,18 @@ import requests
 
 import pickle
 from os import path, mkdir
-
-from hash_test import clahe, phash, applyCLAHE
+from helper_cv2 import phash
 
 def cache_exists(set_code):
     if(path.isdir("./cache")):
         return (path.isfile(f"./cache/{set_code}_hash.npz") and path.isfile(f"./cache/{set_code}_name_map.dat"))
     return False
             
-
+def im_from_url(url):
+    raw_response = requests.get(url, stream=True).raw
+    raw_image = np.asarray(bytearray(raw_response.read()), dtype='uint8')
+    image = cv2.imdecode(raw_image, cv2.IMREAD_COLOR)
+    return image
 
 def create_cache(set_code):
     if(not cache_exists(set_code)):
@@ -61,10 +64,8 @@ def construct_cache(set_code, cards):
         names.append(name)
         
         url = card['image_url']
-        raw_response = requests.get(url, stream=True).raw
-        raw_image = np.asarray(bytearray(raw_response.read()), dtype='uint8')
-        image = cv2.imdecode(raw_image, cv2.IMREAD_COLOR)
-        mod_image = applyCLAHE(image, clahe)
+        image = im_from_url(url)
+        mod_image = image
         hashes[idx] = phash(mod_image)
     print("All {} cards processed. Now saving.".format(n_cards))
     

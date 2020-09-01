@@ -3,3 +3,5 @@ hough-test.py
 cache/*.*
 import/*
 __pycache__/
+cv_io_test.py
+*_test.py
